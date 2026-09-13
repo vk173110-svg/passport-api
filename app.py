@@ -109,7 +109,8 @@ def process_auto_passport():
     try:
         # RAM Safe: बड़ी फोटो को 1600px पर रीसाइज करें
         pil_raw = Image.open(file.stream)
-        pil_raw.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+       # 1600 की जगह 1000px करें (Free Tier RAM सुरक्षित रखने के लिए)
+pil_raw.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
         
         in_buf = io.BytesIO()
         pil_raw.save(in_buf, format="PNG")
