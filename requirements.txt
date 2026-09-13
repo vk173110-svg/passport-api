@@ -1,8 +1,8 @@
-numpy<2
-flask
-flask-cors
-rembg
-pillow
-opencv-python-headless
-onnxruntime
-gunicorn
+flask==3.0.3
+flask-cors==4.0.1
+gunicorn==22.0.0
+rembg==2.0.57
+onnxruntime==1.17.3
+opencv-python-headless==4.9.0.80
+pillow==10.3.0
+numpy<2.0.0
