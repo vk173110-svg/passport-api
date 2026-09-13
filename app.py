@@ -1,13 +1,33 @@
 import io
 import os
+import gc
 from PIL import Image, ImageFilter
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, make_response
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
 
-# ⚡ Lazy Loading Silueta Model
+# ✅ 1. फुल-प्रूफ CORS कन्फिगरेशन
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.before_request
+def handle_preflight():
+    """ब्राउज़र के प्रीफ़्लाइट OPTIONS को तुरंत 200 OK दे"""
+    if request.method == "OPTIONS":
+        res = make_response()
+        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "*"
+        return res, 200
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+# ⚡ Lazy Loading Silueta Model (RAM Safe)
 ai_session = None
 
 def get_session():
@@ -18,13 +38,6 @@ def get_session():
         ai_session = new_session("silueta")
         print("✅ Model Ready!", flush=True)
     return ai_session
-
-@app.after_request
-def after_request(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    return response
 
 def remove_floating_artifacts(alpha_channel):
     import cv2
@@ -72,39 +85,40 @@ def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
     person_w = right - left
     person_h = bottom - top
     img_w, img_h = pil_img.size
+    
+    # 10% हेड मार्जिन
     head_margin = int(person_h * 0.10)
     crop_top = max(0, top - head_margin)
     crop_bottom = min(img_h, bottom)
     crop_h = crop_bottom - crop_top
     target_w = int(crop_h * aspect_ratio)
     center_x = left + person_w // 2
+    
     crop_left = center_x - target_w // 2
     crop_right = crop_left + target_w
+    
     if crop_left < 0:
-        crop_right += abs(crop_left)
+        crop_right = min(img_w, crop_right + abs(crop_left))
         crop_left = 0
     if crop_right > img_w:
         crop_left = max(0, crop_left - (crop_right - img_w))
         crop_right = img_w
+        
     cropped = pil_img.crop((crop_left, crop_top, crop_right, crop_bottom))
     final_h = 1200
     final_w = int(final_h * aspect_ratio)
     return cropped.resize((final_w, final_h), Image.LANCZOS)
 
-# 🚀 Health Check: यह तुरंत 1ms में रेस्पॉन्स देगा, जिससे Render कभी एरर नहीं देगा
+# 🚀 Health Check
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"status": "running", "message": "Ultra HD Studio API Live 24x7!"}), 200
 
-@app.route('/api/remove-bg', methods=['POST', 'OPTIONS'])
+@app.route('/api/remove-bg', methods=['POST'])
 def process_auto_passport():
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "ok"}), 200
-
     if 'image' not in request.files:
         return jsonify({'error': 'No image uploaded'}), 400
 
-    # Lazy Imports जब रिक्वेस्ट आएगी
     from rembg import remove
     import cv2
     import numpy as np
@@ -114,6 +128,7 @@ def process_auto_passport():
     crop_mode = request.form.get('crop_mode', 'passport')
 
     try:
+        # RAM सुरक्षित रखने के लिए 1000px limit
         pil_raw = Image.open(file.stream)
         pil_raw.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
         
@@ -121,12 +136,12 @@ def process_auto_passport():
         pil_raw.save(in_buf, format="PNG")
         input_bytes = in_buf.getvalue()
 
-        # AI BG Remove
+        # ⚡ 1. AI BG Removal
         output_bytes = remove(input_bytes, session=get_session())
         rgba = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
         rgba_np = np.array(rgba)
 
-        # Enhance
+        # ⚡ 2. Enhance & Artifact Removal
         clean_alpha = remove_floating_artifacts(rgba_np[:, :, 3])
         rgba_np[:, :, 3] = clean_alpha
         bgr = cv2.cvtColor(rgba_np[:, :, :3], cv2.COLOR_RGB2BGR)
@@ -135,11 +150,11 @@ def process_auto_passport():
 
         cleaned_pil = Image.fromarray(rgba_np)
 
-        # Smart Crop
+        # ⚡ 3. Smart Crop
         ratio_map = {'passport': 3.5/4.5, 'pancard': 2.5/3.5, 'stamp': 2.0/2.5, 'square': 1.0}
         passport_pil = auto_crop_passport_smart_hd(cleaned_pil, ratio_map.get(crop_mode, 3.5/4.5))
 
-        # BG Color
+        # ⚡ 4. Background Color Setting
         bg_hex = {'white': '#ffffff', 'blue': '#2563eb', 'red': '#dc2626'}.get(bg_color, '#ffffff')
         final_canvas = Image.new("RGBA", passport_pil.size, bg_hex)
 
@@ -154,11 +169,21 @@ def process_auto_passport():
         final_canvas.convert("RGB").save(out_io, format='JPEG', quality=95)
         out_io.seek(0)
 
+        # 🧹 RAM Cleanup (Render 512MB RAM को सेफ रखने के लिए)
+        del pil_raw, input_bytes, output_bytes, rgba, rgba_np, clean_alpha, bgr, hd_bgr, cleaned_pil, passport_pil, final_canvas
+        gc.collect()
+
         return send_file(out_io, mimetype='image/jpeg')
 
     except Exception as e:
         print(f"Server Error: {str(e)}", flush=True)
+        gc.collect()
         return jsonify({'error': str(e)}), 500
+
+# 404/500 Errors के लिए भी CORS हैंडलर
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
