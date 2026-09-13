@@ -1,24 +1,22 @@
 import io
 import os
-import cv2
-import numpy as np
 from PIL import Image, ImageFilter
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
-from rembg import remove, new_session
 
 app = Flask(__name__)
 CORS(app)
 
-# ⚡ Lazy Loading Silueta Model (RAM Safe)
+# ⚡ Lazy Loading Silueta Model
 ai_session = None
 
 def get_session():
     global ai_session
     if ai_session is None:
-        print("⚡ Loading Silueta Model...", flush=True)
+        print("⚡ Loading Rembg & Silueta Model into RAM...", flush=True)
+        from rembg import new_session
         ai_session = new_session("silueta")
-        print("✅ Silueta Model Ready!", flush=True)
+        print("✅ Model Ready!", flush=True)
     return ai_session
 
 @app.after_request
@@ -29,6 +27,8 @@ def after_request(response):
     return response
 
 def remove_floating_artifacts(alpha_channel):
+    import cv2
+    import numpy as np
     _, binary = cv2.threshold(alpha_channel, 30, 255, cv2.THRESH_BINARY)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if num_labels <= 1:
@@ -43,6 +43,8 @@ def remove_floating_artifacts(alpha_channel):
     return np.where(clean_mask > 25, alpha_channel, 0).astype(np.uint8)
 
 def studio_ultra_hd_enhancer(bgr_img, alpha_mask):
+    import cv2
+    import numpy as np
     smooth = cv2.bilateralFilter(bgr_img, d=5, sigmaColor=25, sigmaSpace=25)
     gaussian = cv2.GaussianBlur(smooth, (0, 0), 1.6)
     sharpened = cv2.addWeighted(smooth, 1.45, gaussian, -0.45, 0)
@@ -89,6 +91,7 @@ def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
     final_w = int(final_h * aspect_ratio)
     return cropped.resize((final_w, final_h), Image.LANCZOS)
 
+# 🚀 Health Check: यह तुरंत 1ms में रेस्पॉन्स देगा, जिससे Render कभी एरर नहीं देगा
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({"status": "running", "message": "Ultra HD Studio API Live 24x7!"}), 200
@@ -101,12 +104,16 @@ def process_auto_passport():
     if 'image' not in request.files:
         return jsonify({'error': 'No image uploaded'}), 400
 
+    # Lazy Imports जब रिक्वेस्ट आएगी
+    from rembg import remove
+    import cv2
+    import numpy as np
+
     file = request.files['image']
     bg_color = request.form.get('bg_color', 'white')
     crop_mode = request.form.get('crop_mode', 'passport')
 
     try:
-        # RAM Safe: 1000px limit
         pil_raw = Image.open(file.stream)
         pil_raw.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
         
@@ -132,7 +139,7 @@ def process_auto_passport():
         ratio_map = {'passport': 3.5/4.5, 'pancard': 2.5/3.5, 'stamp': 2.0/2.5, 'square': 1.0}
         passport_pil = auto_crop_passport_smart_hd(cleaned_pil, ratio_map.get(crop_mode, 3.5/4.5))
 
-        # BG Color & Mask Fix
+        # BG Color
         bg_hex = {'white': '#ffffff', 'blue': '#2563eb', 'red': '#dc2626'}.get(bg_color, '#ffffff')
         final_canvas = Image.new("RGBA", passport_pil.size, bg_hex)
 
