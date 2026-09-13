@@ -3,24 +3,31 @@ import os
 import cv2
 import numpy as np
 from PIL import Image, ImageFilter
-from flask import Flask, request, send_file, jsonify, make_response
+from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 from rembg import remove, new_session
 
 app = Flask(__name__)
-# सिर्फ एक जगह सही तरीके से CORS कॉन्फ़िगर करें
-CORS(app, origins="*", allow_headers=["Content-Type"], methods=["GET", "POST", "OPTIONS"])
+# सभी रूट्स के लिए CORS सक्रिय करें
+CORS(app)
 
-# ⚡ Silueta Model Lazy Loader
+# ⚡ Lazy Loading Silueta Model
 ai_session = None
 
 def get_session():
     global ai_session
     if ai_session is None:
-        print("⚡ Loading Silueta 43MB Model...")
+        print("⚡ Loading Silueta Model...", flush=True)
         ai_session = new_session("silueta")
-        print("✅ Silueta Model Ready!")
+        print("✅ Silueta Model Ready!", flush=True)
     return ai_session
+
+@app.after_request
+def after_request(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 def remove_floating_artifacts(alpha_channel):
     _, binary = cv2.threshold(alpha_channel, 30, 255, cv2.THRESH_BINARY)
@@ -87,63 +94,64 @@ def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
 def health():
     return jsonify({"status": "running", "message": "Ultra HD Studio API Live 24x7!"}), 200
 
-@app.route('/api/remove-bg', methods=['POST'])
+@app.route('/api/remove-bg', methods=['POST', 'OPTIONS'])
 def process_auto_passport():
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     if 'image' not in request.files:
-        return jsonify({'error': 'कोई फ़ोटो नहीं मिली'}), 400
+        return jsonify({'error': 'No image uploaded'}), 400
 
     file = request.files['image']
     bg_color = request.form.get('bg_color', 'white')
     crop_mode = request.form.get('crop_mode', 'passport')
 
     try:
-        # 1. सुरक्षा: 512MB RAM क्रैश रोकने के लिए इनपुट इमेज को ऑप्टिमाइज़ करें
+        # RAM Safe: बड़ी फोटो को 1600px पर रीसाइज करें
         pil_raw = Image.open(file.stream)
         pil_raw.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
         
-        in_buffer = io.BytesIO()
-        pil_raw.save(in_buffer, format="PNG")
-        input_bytes = in_buffer.getvalue()
+        in_buf = io.BytesIO()
+        pil_raw.save(in_buf, format="PNG")
+        input_bytes = in_buf.getvalue()
 
-        # 2. AI Background Removal
+        # AI BG Remove
         output_bytes = remove(input_bytes, session=get_session())
         rgba = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
         rgba_np = np.array(rgba)
 
-        # 3. Artifact cleanup & Enhancement
+        # Enhance
         clean_alpha = remove_floating_artifacts(rgba_np[:, :, 3])
         rgba_np[:, :, 3] = clean_alpha
-
         bgr = cv2.cvtColor(rgba_np[:, :, :3], cv2.COLOR_RGB2BGR)
         hd_bgr = studio_ultra_hd_enhancer(bgr, clean_alpha)
         rgba_np[:, :, :3] = cv2.cvtColor(hd_bgr, cv2.COLOR_BGR2RGB)
 
         cleaned_pil = Image.fromarray(rgba_np)
 
-        # 4. Aspect Ratio Crop
+        # Smart Crop
         ratio_map = {'passport': 3.5/4.5, 'pancard': 2.5/3.5, 'stamp': 2.0/2.5, 'square': 1.0}
         passport_pil = auto_crop_passport_smart_hd(cleaned_pil, ratio_map.get(crop_mode, 3.5/4.5))
 
-        # 5. Background Color Replacement
+        # BG Color & Mask Fix
         bg_hex = {'white': '#ffffff', 'blue': '#2563eb', 'red': '#dc2626'}.get(bg_color, '#ffffff')
         final_canvas = Image.new("RGBA", passport_pil.size, bg_hex)
 
         if bg_hex == '#ffffff':
-            # FIX: अल्फा मास्क को सही से निकालें ताकि 'bad transparency mask' एरर न आए
             alpha_mask = passport_pil.split()[-1]
             shadow_mask = alpha_mask.filter(ImageFilter.GaussianBlur(3))
             final_canvas.paste((215, 215, 215, 170), (0, 1), shadow_mask)
 
         final_canvas.paste(passport_pil, (0, 0), passport_pil)
 
-        img_io = io.BytesIO()
-        final_canvas.convert("RGB").save(img_io, format='JPEG', quality=98, subsampling=0)
-        img_io.seek(0)
+        out_io = io.BytesIO()
+        final_canvas.convert("RGB").save(out_io, format='JPEG', quality=95)
+        out_io.seek(0)
 
-        return send_file(img_io, mimetype='image/jpeg')
+        return send_file(out_io, mimetype='image/jpeg')
 
     except Exception as e:
-        print(f"Error processing image: {e}")
+        print(f"Server Error: {str(e)}", flush=True)
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
