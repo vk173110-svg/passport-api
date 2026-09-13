@@ -3,24 +3,48 @@ import os
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, make_response
 from flask_cors import CORS
 from rembg import remove, new_session
 
 app = Flask(__name__)
-CORS(app)
 
-# ⚡ SUPER-LIGHTWEIGHT 43MB MODEL (Takes only ~180MB RAM on Render - ZERO OOM Crash)
+# ✅ 1. सभी वेबसाइट और डोमेन के लिए CORS पूरी तरह खोलें
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# ⚡ 43MB Super-Lightweight Model (RAM Safe)
 ai_session = None
 
 def get_session():
-    """Silueta मॉडल को सिर्फ 180MB रैम में 24x7 चलाएगा"""
     global ai_session
     if ai_session is None:
         print("⚡ Loading Silueta 43MB Lightweight AI Model...")
         ai_session = new_session("silueta")
         print("✅ Silueta Model Ready!")
     return ai_session
+
+# ✅ 2. हर रिक्वेस्ट और एरर पर CORS हेडर जोड़ना
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        res = make_response()
+        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "*"
+        return res, 200
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    response = jsonify({'error': str(e)})
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response, 500
 
 def remove_floating_artifacts(alpha_channel):
     """कान/गर्दन के अनचाहे धब्बे साफ़ करना"""
@@ -43,9 +67,8 @@ def remove_floating_artifacts(alpha_channel):
     return np.where(clean_mask > 25, alpha_channel, 0).astype(np.uint8)
 
 def studio_ultra_hd_enhancer(bgr_img, alpha_mask):
-    """अल्ट्रा-एचडी शार्पनेस और लाइटिंग बैलेंस (तेज़ लाइट दबाना)"""
+    """अल्ट्रा-एचडी शार्पनेस और एंटी-ग्लेयर"""
     smooth = cv2.bilateralFilter(bgr_img, d=5, sigmaColor=25, sigmaSpace=25)
-
     gaussian = cv2.GaussianBlur(smooth, (0, 0), 1.6)
     sharpened = cv2.addWeighted(smooth, 1.45, gaussian, -0.45, 0)
 
@@ -70,7 +93,7 @@ def studio_ultra_hd_enhancer(bgr_img, alpha_mask):
     return retouched
 
 def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
-    """अल्ट्रा-एचडी 1200x1543 मास्टर साइज़ पासपोर्ट क्रॉपिंग"""
+    """1200x1543 मास्टर साइज़ पासपोर्ट क्रॉपिंग"""
     bbox = pil_img.getbbox()
     if not bbox:
         return pil_img
@@ -107,23 +130,31 @@ def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
 def health():
     return jsonify({
         "status": "running",
-        "model": "silueta (43MB Ultra-Light - 24x7 Live)",
+        "model": "silueta (43MB - 24x7 Live)",
         "message": "Passport Studio Cloud API is Live 24x7!"
     })
 
-@app.route('/api/remove-bg', methods=['POST'])
+# ✅ 3. यहाँ methods में 'OPTIONS' भी जोड़ दिया गया है
+@app.route('/api/remove-bg', methods=['POST', 'OPTIONS'])
 def process_auto_passport():
+    if request.method == "OPTIONS":
+        res = make_response()
+        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "*"
+        return res, 200
+
     if 'image' not in request.files:
         return jsonify({'error': 'कोई फ़ोटो नहीं मिली'}), 400
 
     file = request.files['image']
-    bg_color = request.form.get('bg_color', 'blue')
+    bg_color = request.form.get('bg_color', 'white')
     crop_mode = request.form.get('crop_mode', 'passport')
 
     try:
         input_bytes = file.read()
 
-        # ⚡ 43 MB Silueta Model (Super Fast & RAM Safe)
+        # Silueta Model (Lightweight, No OOM)
         output_bytes = remove(
             input_bytes,
             session=get_session()
@@ -136,14 +167,14 @@ def process_auto_passport():
         clean_alpha = remove_floating_artifacts(rgba_np[:, :, 3])
         rgba_np[:, :, 3] = clean_alpha
 
-        # 2. अल्ट्रा-एचडी रिटच और एंटी-ग्लेयर (तेज़ लाइट दबाना)
+        # 2. अल्ट्रा-एचडी रिटच और एंटी-ग्लेयर
         bgr = cv2.cvtColor(rgba_np[:, :, :3], cv2.COLOR_RGB2BGR)
         hd_bgr = studio_ultra_hd_enhancer(bgr, clean_alpha)
         rgba_np[:, :, :3] = cv2.cvtColor(hd_bgr, cv2.COLOR_BGR2RGB)
 
         cleaned_pil = Image.fromarray(rgba_np)
 
-        # 3. अल्ट्रा-एचडी पासपोर्ट क्रॉप (1200x1543)
+        # 3. अल्ट्रा-एचडी क्रॉप
         if crop_mode == 'passport':
             passport_pil = auto_crop_passport_smart_hd(cleaned_pil, 3.5/4.5)
         elif crop_mode == 'pancard':
@@ -156,7 +187,7 @@ def process_auto_passport():
             passport_pil = cleaned_pil
 
         # 4. बैकग्राउंड रंग लगाना
-        bg_hex = {'white': '#ffffff', 'blue': '#2563eb', 'red': '#dc2626'}.get(bg_color, '#2563eb')
+        bg_hex = {'white': '#ffffff', 'blue': '#2563eb', 'red': '#dc2626'}.get(bg_color, '#ffffff')
         final_canvas = Image.new("RGBA", passport_pil.size, bg_hex)
 
         if bg_hex == '#ffffff':
@@ -169,10 +200,14 @@ def process_auto_passport():
         final_canvas.convert("RGB").save(img_io, format='JPEG', quality=100, subsampling=0)
         img_io.seek(0)
 
-        return send_file(img_io, mimetype='image/jpeg')
+        response = make_response(send_file(img_io, mimetype='image/jpeg'))
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        err_res = jsonify({'error': str(e)})
+        err_res.headers["Access-Control-Allow-Origin"] = "*"
+        return err_res, 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
