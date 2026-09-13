@@ -2,16 +2,16 @@ import io
 import os
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageFilter
 from flask import Flask, request, send_file, jsonify, make_response
 from flask_cors import CORS
 from rembg import remove, new_session
 
 app = Flask(__name__)
-# CORS Allow
-CORS(app, resources={r"/*": {"origins": "*"}})
+# सिर्फ एक जगह सही तरीके से CORS कॉन्फ़िगर करें
+CORS(app, origins="*", allow_headers=["Content-Type"], methods=["GET", "POST", "OPTIONS"])
 
-# ⚡ Silueta 43MB Super-Lightweight Model (Zero RAM Crash)
+# ⚡ Silueta Model Lazy Loader
 ai_session = None
 
 def get_session():
@@ -22,25 +22,9 @@ def get_session():
         print("✅ Silueta Model Ready!")
     return ai_session
 
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        res = make_response()
-        res.headers["Access-Control-Allow-Origin"] = "*"
-        res.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        res.headers["Access-Control-Allow-Headers"] = "*"
-        return res, 200
-
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
-
 def remove_floating_artifacts(alpha_channel):
     _, binary = cv2.threshold(alpha_channel, 30, 255, cv2.THRESH_BINARY)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if num_labels <= 1:
         return alpha_channel
     areas = stats[1:, cv2.CC_STAT_AREA]
@@ -101,17 +85,10 @@ def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({"status": "running", "message": "Ultra HD Studio API Live 24x7!"})
+    return jsonify({"status": "running", "message": "Ultra HD Studio API Live 24x7!"}), 200
 
-@app.route('/api/remove-bg', methods=['POST', 'OPTIONS'])
+@app.route('/api/remove-bg', methods=['POST'])
 def process_auto_passport():
-    if request.method == "OPTIONS":
-        res = make_response()
-        res.headers["Access-Control-Allow-Origin"] = "*"
-        res.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        res.headers["Access-Control-Allow-Headers"] = "*"
-        return res, 200
-
     if 'image' not in request.files:
         return jsonify({'error': 'कोई फ़ोटो नहीं मिली'}), 400
 
@@ -120,11 +97,20 @@ def process_auto_passport():
     crop_mode = request.form.get('crop_mode', 'passport')
 
     try:
-        input_bytes = file.read()
+        # 1. सुरक्षा: 512MB RAM क्रैश रोकने के लिए इनपुट इमेज को ऑप्टिमाइज़ करें
+        pil_raw = Image.open(file.stream)
+        pil_raw.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        
+        in_buffer = io.BytesIO()
+        pil_raw.save(in_buffer, format="PNG")
+        input_bytes = in_buffer.getvalue()
+
+        # 2. AI Background Removal
         output_bytes = remove(input_bytes, session=get_session())
         rgba = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
         rgba_np = np.array(rgba)
 
+        # 3. Artifact cleanup & Enhancement
         clean_alpha = remove_floating_artifacts(rgba_np[:, :, 3])
         rgba_np[:, :, 3] = clean_alpha
 
@@ -134,38 +120,31 @@ def process_auto_passport():
 
         cleaned_pil = Image.fromarray(rgba_np)
 
-        if crop_mode == 'passport':
-            passport_pil = auto_crop_passport_smart_hd(cleaned_pil, 3.5/4.5)
-        elif crop_mode == 'pancard':
-            passport_pil = auto_crop_passport_smart_hd(cleaned_pil, 2.5/3.5)
-        elif crop_mode == 'stamp':
-            passport_pil = auto_crop_passport_smart_hd(cleaned_pil, 2.0/2.5)
-        elif crop_mode == 'square':
-            passport_pil = auto_crop_passport_smart_hd(cleaned_pil, 1.0)
-        else:
-            passport_pil = cleaned_pil
+        # 4. Aspect Ratio Crop
+        ratio_map = {'passport': 3.5/4.5, 'pancard': 2.5/3.5, 'stamp': 2.0/2.5, 'square': 1.0}
+        passport_pil = auto_crop_passport_smart_hd(cleaned_pil, ratio_map.get(crop_mode, 3.5/4.5))
 
+        # 5. Background Color Replacement
         bg_hex = {'white': '#ffffff', 'blue': '#2563eb', 'red': '#dc2626'}.get(bg_color, '#ffffff')
         final_canvas = Image.new("RGBA", passport_pil.size, bg_hex)
 
         if bg_hex == '#ffffff':
-            shadow = passport_pil.filter(ImageFilter.GaussianBlur(3))
-            final_canvas.paste((215, 215, 215, 170), (0, 1), shadow)
+            # FIX: अल्फा मास्क को सही से निकालें ताकि 'bad transparency mask' एरर न आए
+            alpha_mask = passport_pil.split()[-1]
+            shadow_mask = alpha_mask.filter(ImageFilter.GaussianBlur(3))
+            final_canvas.paste((215, 215, 215, 170), (0, 1), shadow_mask)
 
         final_canvas.paste(passport_pil, (0, 0), passport_pil)
 
         img_io = io.BytesIO()
-        final_canvas.convert("RGB").save(img_io, format='JPEG', quality=100, subsampling=0)
+        final_canvas.convert("RGB").save(img_io, format='JPEG', quality=98, subsampling=0)
         img_io.seek(0)
 
-        response = make_response(send_file(img_io, mimetype='image/jpeg'))
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        return response
+        return send_file(img_io, mimetype='image/jpeg')
 
     except Exception as e:
-        err_res = jsonify({'error': str(e)})
-        err_res.headers["Access-Control-Allow-Origin"] = "*"
-        return err_res, 500
+        print(f"Error processing image: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
