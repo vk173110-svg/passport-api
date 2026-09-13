@@ -8,10 +8,9 @@ from flask_cors import CORS
 from rembg import remove, new_session
 
 app = Flask(__name__)
-# सभी रूट्स के लिए CORS सक्रिय करें
 CORS(app)
 
-# ⚡ Lazy Loading Silueta Model
+# ⚡ Lazy Loading Silueta Model (RAM Safe)
 ai_session = None
 
 def get_session():
@@ -86,7 +85,7 @@ def auto_crop_passport_smart_hd(pil_img, aspect_ratio=3.5/4.5):
         crop_left = max(0, crop_left - (crop_right - img_w))
         crop_right = img_w
     cropped = pil_img.crop((crop_left, crop_top, crop_right, crop_bottom))
-    final_h = 1543
+    final_h = 1200
     final_w = int(final_h * aspect_ratio)
     return cropped.resize((final_w, final_h), Image.LANCZOS)
 
@@ -107,10 +106,9 @@ def process_auto_passport():
     crop_mode = request.form.get('crop_mode', 'passport')
 
     try:
-        # RAM Safe: बड़ी फोटो को 1600px पर रीसाइज करें
+        # RAM Safe: 1000px limit
         pil_raw = Image.open(file.stream)
-       # 1600 की जगह 1000px करें (Free Tier RAM सुरक्षित रखने के लिए)
-pil_raw.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
+        pil_raw.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
         
         in_buf = io.BytesIO()
         pil_raw.save(in_buf, format="PNG")
